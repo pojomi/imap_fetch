@@ -155,24 +155,25 @@ size_t decode_64(char *d, size_t d_len, char *s, size_t s_len, size_t *leftover)
     return j;
 }
 
-size_t decode_qp(char *data, size_t len, size_t *leftover)
+size_t decode_qp(char *data, size_t s_len, size_t *leftover)
 {
     // Read position
     size_t i = 0;
     // Write position
     size_t j = 0;
     *leftover = 0;
-    while (i < len)
+    
+    while (i < s_len)
     {
         if (data[i] == '=')
         {
-            if (i + 2 >= len)
+            if (i + 2 >= s_len)
             {
-                *leftover = len - i;
+                *leftover = s_len - i;
                 break;
             }
             // For \r, disregard
-            if (i + 2 < len && data[i + 1] == '\r' && data[i + 2] == '\n')
+            if (i + 2 < s_len && data[i + 1] == '\r' && data[i + 2] == '\n')
             {
                 i += 3;
                 continue;
@@ -180,13 +181,13 @@ size_t decode_qp(char *data, size_t len, size_t *leftover)
             // Hex conversion
             // Verify that there are 2 bytes after index position
             // For \n, disregard
-            if (i + 2 < len && data[i + 1] == '\n')
+            if (i + 2 < s_len && data[i + 1] == '\n')
             {
                 // Only increment by 2 since there's only 2 characters here
                 i += 2;
                 continue;
             }
-            if (i + 2 < len)
+            if (i + 2 < s_len)
             {
                 int hi = hexval(data[i + 1]);
                 int low = hexval(data[i + 2]);
@@ -218,7 +219,7 @@ int imap_send_request(SSL *ssl, char *request)
     if (SSL_write(ssl, request, strlen(request)) <= 0)
     {
         perror("Failed to send message\n");
-        return 1;
+        return -1;
     }
     printf("Successfully sent\n");
     return 0;
@@ -231,7 +232,7 @@ int imap_download_attach(SSL *ssl, char *filename, char *buffer, size_t buffer_s
     if (!f)
     {
         perror("Failed to open file\n");
-        return 1;
+        return -1;
     }
     // strchr points to the address of the first match in the string
     // so that gives us the starting point of the download size value in the curly braces
@@ -252,21 +253,25 @@ int imap_download_attach(SSL *ssl, char *filename, char *buffer, size_t buffer_s
     {
         initial_response_data = download_size;
     }
+    // 4 byte allocation since base64 encodes in chunks of 4 and quoted-printable in chunks of 3
     char pending[4];
     size_t leftover = 0;
     size_t pending_len = 0;
     size_t initial_decoded_len;
     size_t decoded_len = 0;
-    char decoded_data[4096];
+    char *decoded_data = malloc(buffer_size);
+    memset(decoded_data, 0, buffer_size);
     int b64_file = 0;
     int qp_file = 0;
     if (strstr(buffer, "JVBE"))
     {
-        initial_decoded_len = decode_64(decoded_data, sizeof(decoded_data), data_start, initial_response_data, &leftover);
+        initial_decoded_len = decode_64(decoded_data, buffer_size, data_start, initial_response_data, &leftover);
         b64_file = 1;
         if (initial_decoded_len <= 0)
         {
             b64_file = 0;
+            free(decoded_data);
+            fclose(f);
             return -1;
         }
     }
@@ -278,25 +283,38 @@ int imap_download_attach(SSL *ssl, char *filename, char *buffer, size_t buffer_s
     else 
     {
         perror("Decoding for this type not supported\n");
-        return 1;
+        free(decoded_data);
+        fclose(f);
+        return -1;
     }
     if (leftover > 0)
     {
         memcpy(pending, data_start + initial_response_data - leftover, leftover);
         pending_len += leftover;
     }
-    printf("Successfully decoded first block\n");
 
     // Check for download_size which is provided in the initial buffer response header
     
     if (initial_response_data > 0)
     {
-        b64_file == 1 ? fwrite(decoded_data, 1, initial_decoded_len, f) : fwrite(data_start, 1, initial_decoded_len, f);
+        if (b64_file == 1)
+        {
+            fwrite(decoded_data, 1, initial_decoded_len, f);
+        }
+        else if (qp_file == 1)
+        {
+            fwrite(data_start, 1, initial_decoded_len, f);
+        }
+        else
+        {
+            printf("No valid encoding found. Exiting\n");
+            free(decoded_data);
+            fclose(f);
+            return -1;
+        }
         downloaded_bytes += initial_response_data - leftover;
-        printf("Downloading initial buffer attachment bytes\n");
         printf("Downloaded %d bytes of %d\n", downloaded_bytes, download_size);
-        printf("Clearing the buffer\n");
-        memset(decoded_data, 0, sizeof(decoded_data));
+        memset(decoded_data, 0, initial_decoded_len);
     }
     
     while (downloaded_bytes < download_size)
@@ -315,10 +333,11 @@ int imap_download_attach(SSL *ssl, char *filename, char *buffer, size_t buffer_s
         }
         if (b64_file == 1)
         {
-            printf("Calling decode_64 from main loop\n");
-            decoded_len = decode_64(decoded_data, sizeof(decoded_data), buffer, chunk_bytes_read, &leftover);
+            decoded_len = decode_64(decoded_data, buffer_size, buffer, chunk_bytes_read, &leftover);
             if (decoded_len < 0)
             {
+                free(decoded_data);
+                fclose(f);
                 return -1;
             }
         }
@@ -329,7 +348,9 @@ int imap_download_attach(SSL *ssl, char *filename, char *buffer, size_t buffer_s
             {
                 printf("Failed to decode current block. Exiting\n");
                 fflush(f);
-                break;
+                fclose(f);
+                free(decoded_data);
+                return -1;
             }
         }
 
@@ -343,64 +364,88 @@ int imap_download_attach(SSL *ssl, char *filename, char *buffer, size_t buffer_s
         {
             decoded_len = download_size - downloaded_bytes;
         }
-        char *eof = strstr(decoded_data, "%%EOF");
-        if (eof)
+        int download_percent = (downloaded_bytes * 100) / download_size;
+        if (b64_file == 1)
         {
-            decoded_len = eof + 5 - decoded_data;
+            char *eof = strstr(decoded_data, "%%EOF");
+            if (eof)
+            {
+                decoded_len = (size_t)(eof + 4);
+                downloaded_bytes += chunk_bytes_read - leftover;
+                break;   
+            }
             fwrite(decoded_data, 1, decoded_len, f);
-            downloaded_bytes += decoded_len;
-            break;   
         }
-
-        b64_file == 1 ? fwrite(decoded_data, 1, decoded_len, f) : fwrite(buffer, 1, decoded_len, f);
+        else if (qp_file == 1)
+        {
+            fwrite(buffer, 1, decoded_len, f);
+        }
         downloaded_bytes += chunk_bytes_read - leftover;
-        memset(decoded_data, 0, sizeof(decoded_data));
+        printf("\rDownloaded %d bytes of %d (%d%%)", downloaded_bytes, download_size, download_percent);
+        fflush(stdout);
+        printf("\n");
+        memset(decoded_data, 0, decoded_len);
     }
     printf("Downloaded %d bytes of %d\n", downloaded_bytes, download_size);
     fclose(f);
-    printf("File closed\n");
+    printf("File saved as %s\n", filename);
+    free(decoded_data);
     b64_file = 0;
     qp_file = 0;
-    // const char *request_start = "tag LOGIN potter.jonathan.m@gmail.com evfqtsocoqdsmkww\r\n";
     return 0;
 }
 
 int receive_imap_response(SSL *ssl, char *tag)
 {
-    char buffer[4096];
+    int buffer_size = 256;
+    char *buffer = malloc(buffer_size);
+
+    int download_initialized = 0;
     int bytes_read;
+    int total_bytes_read = 0;
     
     while (1)
     {
-        bytes_read = SSL_read(ssl, buffer, sizeof(buffer) - 1);
-
+        bytes_read = SSL_read(ssl, buffer, buffer_size - 1);
+        
         if (bytes_read <= 0)
         {
             printf("0 bytes found\n");
             break;
         }
-        
-        buffer[bytes_read] = '\0';
-
+        if (strstr((const char *)buffer, "BAD"))
+        {
+            printf("BAD response received from server\n");
+            memset(buffer, 0, buffer_size);
+            break;
+        }
         if(strstr((const char *)buffer, tag) == NULL)
         {
-            if (strstr((const char *)buffer, "BAD"))
+            total_bytes_read += bytes_read;
+            
+            if (download_initialized == 0)
             {
-                printf("%s\n", buffer);
-                break;
+                if (buffer_size < 2048)
+                {
+                    buffer_size *= 2;
+                }
+
+                buffer = realloc(buffer, buffer_size);
             }
-            printf("%s\n", buffer);
-            continue;
         }
-        
-        if (strstr((const char *)buffer, tag))
+        if (strstr((const char *)buffer ,tag))
         {
+            total_bytes_read += bytes_read;
+            bytes_read = total_bytes_read;
+            buffer_size = bytes_read;
+            buffer = realloc(buffer, buffer_size);
+
             // Conditions to handle file download (tag FETCH [ID] body[PART])
             // Response includes {RB_SIZE}
             // Parse that and store as download size
             if (strstr(tag, "(BODY"))
             {
-                printf("Response received:\n%s\n", buffer);
+                printf("Response received:\n%s\n", (const char *)buffer);
                 printf("Bytes: %d\n", bytes_read);
                 char filename[128];
                 printf("Name file>");
@@ -409,17 +454,21 @@ int receive_imap_response(SSL *ssl, char *tag)
                     filename[strcspn(filename, "\n")] = '\0';
                 }
                 printf("Beginning file creation\n");
-                if (imap_download_attach(ssl, filename, buffer, sizeof(buffer), &bytes_read) != 0)
+                if (imap_download_attach(ssl, filename, buffer, buffer_size, &bytes_read) != 0)
                 {
+                    download_initialized = 1;
                     break;
                 }
             }
-            printf("Response received:\n%s\n", buffer);
-            printf("Bytes: %d\n", bytes_read);
-            printf("done\n");
-            break;
+            if (download_initialized == 0)
+            {
+                printf("Response received:\n%s\n", (const char *)buffer);
+                break;
+            }
         }
     }
+    download_initialized = 0;
+    free(buffer);
     return 0;
 }
 
@@ -444,7 +493,7 @@ int imap_prompt_login(SSL *ssl)
         }
         
         password_buffer[strcspn(password_buffer, "\n")] = '\0';
-        char imap_formatted_message[384];
+        char imap_formatted_message[320];
         snprintf(imap_formatted_message, sizeof(imap_formatted_message), "a1 LOGIN %s %s\r\n", email_buffer, password_buffer);
         if (imap_send_request(ssl, imap_formatted_message) != 0)
         {
