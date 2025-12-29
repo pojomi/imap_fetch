@@ -10,7 +10,7 @@
 #include <openssl/ssl.h>
 
 int main() {
-
+    
     SSL_library_init();
     SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
     SSL *ssl = SSL_new(ctx);
