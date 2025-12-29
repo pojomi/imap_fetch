@@ -4,9 +4,6 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <netdb.h>
 #include <openssl/ssl.h>
 
 int hexval(char c)
