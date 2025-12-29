@@ -2,3 +2,4 @@
 CLAUDE.md
 imap_fetch
 *.code-workspace
+./src/imap_fetch
