@@ -2,7 +2,55 @@
 #include "../include/decoders.h"
 #include <openssl/ssl.h>
 
-int wrapper_ssl_read(void *wrap_ssl, void *buf, int len)
+
+char *my_memmem(const char *haystack, size_t hay_len, const char *needle, size_t needle_len)
+{
+    if (needle_len > hay_len) return NULL;
+
+    for (size_t i = 0; i < hay_len - needle_len; i++)
+    {
+        if (memcmp(haystack + i, needle, needle_len) == 0)
+        {
+            return (char *)(haystack + i);
+        }
+    }
+    return NULL;
+}
+
+int find_offset(Str haystack, Str needle)
+{
+    if (needle.len == 0)
+    {
+        return -1;
+    }
+
+    char *found = my_memmem(haystack.data, haystack.len, needle.data, needle.len);
+
+    if (found)
+    {
+        return found - haystack.data;
+    }
+
+    return -1;
+}
+
+Str find_subsbring(Str haystack, Str needle)
+{
+    if (needle.len == 0)
+    {
+        return (Str){NULL, 0};
+    }
+
+    char *found = my_memmem(haystack.data, haystack.len, needle.data, needle.len);
+
+    if (found)
+    {
+        return (Str){found, haystack.len - (found - haystack.data)};
+    }
+    return (Str){NULL, 0};
+}
+
+int wrapper_ssl_read(void *wrap_ssl, void *buf, size_t len)
 {
     int bytes_read = SSL_read((SSL *)wrap_ssl, buf, len);
     if (bytes_read > 0)
@@ -15,7 +63,7 @@ int wrapper_ssl_read(void *wrap_ssl, void *buf, int len)
     }
 }
 
-int wrapper_ssl_write(void *wrap_ssl, const void *buf, int len)
+int wrapper_ssl_write(void *wrap_ssl, const void *buf, size_t len)
 {
     int bytes_written = SSL_write((SSL *)wrap_ssl, buf, len);
     if (bytes_written > 0)
@@ -50,7 +98,7 @@ int imap_send_request(void *wrap_ssl, char *request)
     return 0;
 }
 
-int imap_download_attach(void *wrap_ssl, char *filename, char *buffer, size_t buffer_size, int *bytes_read)
+int imap_download_attach(void *wrap_ssl, char *filename, char *buffer, size_t buffer_size, int bytes_read)
 {
     
     FILE *f = fopen(filename, "wb");
@@ -72,7 +120,7 @@ int imap_download_attach(void *wrap_ssl, char *filename, char *buffer, size_t bu
     int download_size = atol(open_brace + 1);
     int downloaded_bytes = 0;
     char *data_start = close_brace + 3;
-    int initial_response_data = *bytes_read - (data_start - buffer);
+    int initial_response_data = bytes_read - (data_start - buffer);
 
     if (initial_response_data > download_size)
     {
@@ -222,8 +270,9 @@ int imap_download_attach(void *wrap_ssl, char *filename, char *buffer, size_t bu
 
 int receive_imap_response(void *wrap_ssl, char *tag)
 {
-    int buffer_size = 256;
-    char *buffer = malloc(buffer_size);
+    buffer buff = {0};
+    buff.data = calloc(256, sizeof(char));
+    buff.capacity = 256;
 
     int download_initialized = 0;
     int bytes_read;
@@ -231,46 +280,47 @@ int receive_imap_response(void *wrap_ssl, char *tag)
     
     while (1)
     {
-        bytes_read = wrapper_ssl_read(wrap_ssl, buffer, buffer_size - 1);
+        bytes_read = wrapper_ssl_read(wrap_ssl, buff.data, (int)buff.capacity - 1);
         
         if (bytes_read <= 0)
         {
             printf("0 bytes found\n");
             break;
         }
-        if (strstr((const char *)buffer, "BAD"))
+        buff.capacity += bytes_read;
+        if (strstr((const char *)buff.data, "BAD"))
         {
             printf("BAD response received from server\n");
-            memset(buffer, 0, buffer_size);
+            memset(buff.data, 0, buff.capacity);
             break;
         }
-        if(strstr((const char *)buffer, tag) == NULL)
+        if(strstr((const char *)buff.data, tag) == NULL)
         {
             total_bytes_read += bytes_read;
             
             if (download_initialized == 0)
             {
-                if (buffer_size < 2048)
+                if (buff.capacity < 2048)
                 {
-                    buffer_size *= 2;
+                    buff.capacity *= 2;
                 }
 
-                buffer = realloc(buffer, buffer_size);
+                buff.data = realloc(buff.data, buff.capacity);
             }
         }
-        if (strstr((const char *)buffer ,tag))
+        if (strstr((const char *)buff.data ,tag))
         {
             total_bytes_read += bytes_read;
             bytes_read = total_bytes_read;
-            buffer_size = bytes_read;
-            buffer = realloc(buffer, buffer_size);
+            buff.capacity = bytes_read;
+            buff.data = realloc(buff.data, buff.capacity);
 
             // Conditions to handle file download (tag FETCH [ID] body[PART])
             // Response includes {RB_SIZE}
             // Parse that and store as download size
             if (strstr(tag, "(BODY"))
             {
-                printf("Response received:\n%s\n", (const char *)buffer);
+                printf("Response received:\n%s\n", (const char *)buff.data);
                 printf("Bytes: %d\n", bytes_read);
                 char filename[128];
                 printf("Name file>");
@@ -279,7 +329,7 @@ int receive_imap_response(void *wrap_ssl, char *tag)
                     filename[strcspn(filename, "\n")] = '\0';
                 }
                 printf("Beginning file creation\n");
-                if (imap_download_attach(wrap_ssl, filename, buffer, buffer_size, &bytes_read) != 0)
+                if (imap_download_attach(wrap_ssl, filename, buff.data, buff.capacity, bytes_read) != 0)
                 {
                     download_initialized = 1;
                     break;
@@ -287,13 +337,13 @@ int receive_imap_response(void *wrap_ssl, char *tag)
             }
             if (download_initialized == 0)
             {
-                printf("Response received:\n%s\n", (const char *)buffer);
+                printf("Response received:\n%s\n", (const char *)buff.data);
                 break;
             }
         }
     }
     download_initialized = 0;
-    free(buffer);
+    free(buff.data);
     return 0;
 }
 
