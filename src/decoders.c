@@ -145,3 +145,61 @@ size_t decode_64(char *d, size_t d_len, char *s, size_t s_len, size_t *leftover)
     }
     return j;
 }
+
+size_t decode_qp(char *data, size_t s_len, size_t *leftover)
+{
+    // Read position
+    size_t i = 0;
+    // Write position
+    size_t j = 0;
+    *leftover = 0;
+    
+    while (i < s_len)
+    {
+        if (data[i] == '=')
+        {
+            if (i + 2 >= s_len)
+            {
+                *leftover = s_len - i;
+                break;
+            }
+            // For \r, disregard
+            if (i + 2 < s_len && data[i + 1] == '\r' && data[i + 2] == '\n')
+            {
+                i += 3;
+                continue;
+            }
+            // Hex conversion
+            // Verify that there are 2 bytes after index position
+            // For \n, disregard
+            if (i + 2 < s_len && data[i + 1] == '\n')
+            {
+                // Only increment by 2 since there's only 2 characters here
+                i += 2;
+                continue;
+            }
+            if (i + 2 < s_len)
+            {
+                int hi = hexval(data[i + 1]);
+                int low = hexval(data[i + 2]);
+
+                if (hi >= 0 && low >= 0)
+                {
+                    // Write string at read_pos then ++
+                    // Since unsigned char ==  8 bits, shift hi by 4 bits, then OR low into last 4
+                    data[j++] = (unsigned char)((hi << 4) | low);
+                    // Move read_pos up by 3 chars to next =XX 0 index
+                    i += 3;
+                    continue;
+                }
+            }
+            // Keep write_pos at the '=' (0 index) of read_pos
+            data[j++] = data[i++];
+        }
+        else
+        {
+            data[j++] = data[i++];
+        }
+    }
+    return j;
+}

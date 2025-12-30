@@ -1,68 +1,47 @@
 #include "../include/utils.h"
 #include "../include/decoders.h"
+#include <openssl/ssl.h>
 
-size_t decode_qp(char *data, size_t s_len, size_t *leftover)
+int wrapper_ssl_read(void *wrap_ssl, void *buf, int len)
 {
-    // Read position
-    size_t i = 0;
-    // Write position
-    size_t j = 0;
-    *leftover = 0;
-    
-    while (i < s_len)
+    int bytes_read = SSL_read((SSL *)wrap_ssl, buf, len);
+    if (bytes_read > 0)
     {
-        if (data[i] == '=')
-        {
-            if (i + 2 >= s_len)
-            {
-                *leftover = s_len - i;
-                break;
-            }
-            // For \r, disregard
-            if (i + 2 < s_len && data[i + 1] == '\r' && data[i + 2] == '\n')
-            {
-                i += 3;
-                continue;
-            }
-            // Hex conversion
-            // Verify that there are 2 bytes after index position
-            // For \n, disregard
-            if (i + 2 < s_len && data[i + 1] == '\n')
-            {
-                // Only increment by 2 since there's only 2 characters here
-                i += 2;
-                continue;
-            }
-            if (i + 2 < s_len)
-            {
-                int hi = hexval(data[i + 1]);
-                int low = hexval(data[i + 2]);
-
-                if (hi >= 0 && low >= 0)
-                {
-                    // Write string at read_pos then ++
-                    // Since unsigned char ==  8 bits, shift hi by 4 bits, then OR low into last 4
-                    data[j++] = (unsigned char)((hi << 4) | low);
-                    // Move read_pos up by 3 chars to next =XX 0 index
-                    i += 3;
-                    continue;
-                }
-            }
-            // Keep write_pos at the '=' (0 index) of read_pos
-            data[j++] = data[i++];
-        }
-        else
-        {
-            data[j++] = data[i++];
-        }
+        return bytes_read;
     }
-    return j;
+    else
+    {
+        return -1;
+    }
 }
 
-int imap_send_request(SSL *ssl, char *request)
+int wrapper_ssl_write(void *wrap_ssl, const void *buf, int len)
+{
+    int bytes_written = SSL_write((SSL *)wrap_ssl, buf, len);
+    if (bytes_written > 0)
+    {
+        return bytes_written;
+    }
+    else
+    {
+        return -1;
+    }
+}
+
+void wrapper_ssl_free(void *wrap_ssl)
+{
+    SSL_free((SSL *)wrap_ssl);
+}
+
+void wrapper_ssl_ctx_free(void *wrapper_ssl_ctx)
+{
+    SSL_CTX_free((SSL_CTX *)wrapper_ssl_ctx);
+}
+
+int imap_send_request(void *wrap_ssl, char *request)
 {
     printf("Sending: %s\n", request);
-    if (SSL_write(ssl, request, strlen(request)) <= 0)
+    if (wrapper_ssl_write(wrap_ssl, request, strlen(request)) <= 0)
     {
         perror("Failed to send message\n");
         return -1;
@@ -71,7 +50,7 @@ int imap_send_request(SSL *ssl, char *request)
     return 0;
 }
 
-int imap_download_attach(SSL *ssl, char *filename, char *buffer, size_t buffer_size, int *bytes_read)
+int imap_download_attach(void *wrap_ssl, char *filename, char *buffer, size_t buffer_size, int *bytes_read)
 {
     
     FILE *f = fopen(filename, "wb");
@@ -167,7 +146,7 @@ int imap_download_attach(SSL *ssl, char *filename, char *buffer, size_t buffer_s
     {
         int remaining = download_size - downloaded_bytes;
         int to_read = (remaining < buffer_size - pending_len ? remaining : buffer_size - pending_len);
-        int chunk_bytes_read = SSL_read(ssl, buffer, to_read);
+        int chunk_bytes_read = wrapper_ssl_read(wrap_ssl, buffer, to_read);
         
 
         if (pending_len > 0)
@@ -241,7 +220,7 @@ int imap_download_attach(SSL *ssl, char *filename, char *buffer, size_t buffer_s
     return 0;
 }
 
-int receive_imap_response(SSL *ssl, char *tag)
+int receive_imap_response(void *wrap_ssl, char *tag)
 {
     int buffer_size = 256;
     char *buffer = malloc(buffer_size);
@@ -252,7 +231,7 @@ int receive_imap_response(SSL *ssl, char *tag)
     
     while (1)
     {
-        bytes_read = SSL_read(ssl, buffer, buffer_size - 1);
+        bytes_read = wrapper_ssl_read(wrap_ssl, buffer, buffer_size - 1);
         
         if (bytes_read <= 0)
         {
@@ -300,7 +279,7 @@ int receive_imap_response(SSL *ssl, char *tag)
                     filename[strcspn(filename, "\n")] = '\0';
                 }
                 printf("Beginning file creation\n");
-                if (imap_download_attach(ssl, filename, buffer, buffer_size, &bytes_read) != 0)
+                if (imap_download_attach(wrap_ssl, filename, buffer, buffer_size, &bytes_read) != 0)
                 {
                     download_initialized = 1;
                     break;
@@ -318,7 +297,7 @@ int receive_imap_response(SSL *ssl, char *tag)
     return 0;
 }
 
-int imap_prompt_login(SSL *ssl)
+int imap_prompt_login(void *wrap_ssl)
 {
     while (1)
     {
@@ -341,7 +320,7 @@ int imap_prompt_login(SSL *ssl)
         password_buffer[strcspn(password_buffer, "\n")] = '\0';
         char imap_formatted_message[320];
         snprintf(imap_formatted_message, sizeof(imap_formatted_message), "a1 LOGIN %s %s\r\n", email_buffer, password_buffer);
-        if (imap_send_request(ssl, imap_formatted_message) != 0)
+        if (imap_send_request(wrap_ssl, imap_formatted_message) != 0)
         {
             perror("Message sending failure\n");
             continue;
@@ -350,24 +329,27 @@ int imap_prompt_login(SSL *ssl)
     }
 }
 
-int imap_init()
+int imap_init_connection(struct Connection_wrapper *cwrap)
 {
     SSL_library_init();
     SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
     SSL *ssl = SSL_new(ctx);
 
+    cwrap->wrap_ssl_ctx = (void *)ctx;
+    cwrap->wrap_ssl = (void *)ssl;
+    cwrap->wrap_ssl_read = wrapper_ssl_read;
+    cwrap->wrap_ssl_write = wrapper_ssl_write;
+
     const char *hostname = "imap.gmail.com";
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
-    SSL_set_fd(ssl, sock);
+    cwrap->sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    SSL_set_fd(ssl, cwrap->sockfd);
     struct sockaddr_in host;
     struct hostent *he = gethostbyname("imap.gmail.com");
     memcpy(&host.sin_addr, he->h_addr_list[0], he->h_length);
     host.sin_family = AF_INET;
     host.sin_port = htons(993);
 
-    int logged_in = 0;
-
-    if (connect(sock, (const struct sockaddr *)&host, sizeof(host)) < 0)
+    if (connect(cwrap->sockfd, (const struct sockaddr *)&host, sizeof(host)) < 0)
     {
         perror("failed to connect\n");
         exit(EXIT_FAILURE);
@@ -389,75 +371,10 @@ int imap_init()
         exit(EXIT_FAILURE);
     }
 
-    if (receive_imap_response(ssl, "ready for requests") == 1)
+    if (receive_imap_response(cwrap->wrap_ssl, "ready for requests") == 1)
     {
         perror("No initial success message\n");
         exit(EXIT_FAILURE);
     }
-    while (1)
-    {
-        if (logged_in == 0)
-        {
-            if (imap_prompt_login(ssl) == 1)
-            {
-                continue;
-            }
-
-            if (receive_imap_response(ssl, "Success") == 1)
-            {
-                printf("Failed login\n");
-                continue;
-            }
-            logged_in = 1;
-        }
-        
-        printf("IMAP>"); 
-        char input_buffer[256];
-        
-        if (fgets(input_buffer, sizeof(input_buffer), stdin) == NULL)
-        {
-            continue;
-        }
-
-        
-        input_buffer[strcspn(input_buffer, "\n")] = '\0';
-        strcat(input_buffer, "\r\n");
-        
-        if (imap_send_request(ssl, input_buffer) == 1)
-        {
-            continue;
-        }
-        
-        if (strstr(input_buffer, "body["))
-        {
-            printf("Looking for response\n");
-            
-            if (receive_imap_response(ssl, "(BODY") == 1)
-            {
-                continue;
-            }
-            
-            memset(input_buffer, 0, sizeof(input_buffer));
-            break;
-        }
-        
-        memset(input_buffer, 0, sizeof(input_buffer));
-        printf("Looking for response\n");
-        if (receive_imap_response(ssl, "Success") == 1)
-        {
-            printf("Unsuccessful action\n");
-            continue;
-        }   
-        
-        // Good note to remember: use stdin macro == FILE *stdin
-        // stdin is the predefined standard input stream for any program
-        // Cheat for GMAIL command: tag SEARCH x-gm-raw "from: has:"
-        
-        // Create buffer for file writing
-        
-    }
-    SSL_free(ssl);
-    SSL_CTX_free(ctx);
-    close(sock);
     return 0;
 }
