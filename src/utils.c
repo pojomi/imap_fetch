@@ -5,15 +5,16 @@
 
 char *my_memmem(const char *haystack, size_t hay_len, const char *needle, size_t needle_len)
 {
-    if (needle_len > hay_len) return NULL;
-
+    printf("my_memmem init\n");
     for (size_t i = 0; i < hay_len - needle_len; i++)
     {
         if (memcmp(haystack + i, needle, needle_len) == 0)
         {
+            printf("found match in my_memmem\n");
             return (char *)(haystack + i);
         }
     }
+    printf("no match found in my_memmem\n");
     return NULL;
 }
 
@@ -34,28 +35,33 @@ int find_offset(Str haystack, Str needle)
     return -1;
 }
 
-Str find_subsbring(Str haystack, Str needle)
+Str find_substring(Str haystack, Str needle)
 {
+    printf("running find_substring\n");
+    printf("Looking for %s needle in:\nHaystack: %s\n", needle.data, haystack.data);
     if (needle.len == 0)
     {
+        printf("needle has no value\n");
         return (Str){NULL, 0};
     }
 
     char *found = my_memmem(haystack.data, haystack.len, needle.data, needle.len);
-
-    if (found)
+    
+    if (found != NULL)
     {
+        printf("substring found: %s\n123", found);
         return (Str){found, haystack.len - (found - haystack.data)};
     }
+    printf("substring not found, returning NULL\nReturn of my_memmem: %s", found);
     return (Str){NULL, 0};
 }
 
-int wrapper_ssl_read(void *wrap_ssl, void *buf, size_t len)
+size_t wrapper_ssl_read(void *wrap_ssl, void *buf, size_t len)
 {
-    int bytes_read = SSL_read((SSL *)wrap_ssl, buf, len);
+    size_t bytes_read = (size_t) SSL_read((SSL *)wrap_ssl, buf, len);
     if (bytes_read > 0)
     {
-        return bytes_read;
+        return (size_t)bytes_read;
     }
     else
     {
@@ -194,7 +200,7 @@ int imap_download_attach(void *wrap_ssl, char *filename, char *buffer, size_t bu
     {
         int remaining = download_size - downloaded_bytes;
         int to_read = (remaining < buffer_size - pending_len ? remaining : buffer_size - pending_len);
-        int chunk_bytes_read = wrapper_ssl_read(wrap_ssl, buffer, to_read);
+        size_t chunk_bytes_read = wrapper_ssl_read(wrap_ssl, buffer, to_read);
         
 
         if (pending_len > 0)
@@ -268,60 +274,70 @@ int imap_download_attach(void *wrap_ssl, char *filename, char *buffer, size_t bu
     return 0;
 }
 
-int receive_imap_response(void *wrap_ssl, char *tag)
+int receive_imap_response(void *wrap_ssl, Str *tag)
 {
     buffer buff = {0};
     buff.data = calloc(256, sizeof(char));
     buff.capacity = 256;
+    buff.len = 0;
 
     int download_initialized = 0;
-    int bytes_read;
+    // int bytes_read;
     int total_bytes_read = 0;
     
+    printf("Parsing response for %s\n", (const char *)tag->data);
     while (1)
     {
-        bytes_read = wrapper_ssl_read(wrap_ssl, buff.data, (int)buff.capacity - 1);
+        buff.len = wrapper_ssl_read(wrap_ssl, buff.data, buff.capacity - 1);
         
-        if (bytes_read <= 0)
+        if (buff.len <= 0)
         {
             printf("0 bytes found\n");
             break;
         }
-        buff.capacity += bytes_read;
-        if (strstr((const char *)buff.data, "BAD"))
+        
+        Str bad_response = find_substring((Str){buff.data, buff.len}, STR_LIT("BAD"));
+        if (bad_response.data == NULL)
+        {
+            printf("No BAD response found\n");
+        }
+        else
         {
             printf("BAD response received from server\n");
+            printf("Response: %s\n", (const char *)buff.data);
             memset(buff.data, 0, buff.capacity);
             break;
         }
-        if(strstr((const char *)buff.data, tag) == NULL)
+        Str no_match = find_substring((Str){buff.data, buff.len}, *tag);
+        if (no_match.data == NULL)
         {
-            total_bytes_read += bytes_read;
-            
+            printf("No match on this loop.\n");    
             if (download_initialized == 0)
             {
                 if (buff.capacity < 2048)
                 {
                     buff.capacity *= 2;
                 }
-
+    
                 buff.data = realloc(buff.data, buff.capacity);
             }
         }
-        if (strstr((const char *)buff.data ,tag))
+        Str match = find_substring((Str){buff.data, buff.len}, *tag);
+        if (match.data != NULL)
         {
-            total_bytes_read += bytes_read;
-            bytes_read = total_bytes_read;
-            buff.capacity = bytes_read;
+            total_bytes_read += buff.len;
+            buff.len = total_bytes_read;
+            buff.capacity = buff.len;
             buff.data = realloc(buff.data, buff.capacity);
 
             // Conditions to handle file download (tag FETCH [ID] body[PART])
             // Response includes {RB_SIZE}
             // Parse that and store as download size
-            if (strstr(tag, "(BODY"))
+            Str download_response = find_substring(STR_LIT(buff.data), STR_LIT("(BODY"));
+            if (download_response.data != NULL)
             {
                 printf("Response received:\n%s\n", (const char *)buff.data);
-                printf("Bytes: %d\n", bytes_read);
+                printf("Bytes: %ld\n", buff.len);
                 char filename[128];
                 printf("Name file>");
                 if (fgets(filename, sizeof(filename), stdin) != NULL)
@@ -329,7 +345,7 @@ int receive_imap_response(void *wrap_ssl, char *tag)
                     filename[strcspn(filename, "\n")] = '\0';
                 }
                 printf("Beginning file creation\n");
-                if (imap_download_attach(wrap_ssl, filename, buff.data, buff.capacity, bytes_read) != 0)
+                if (imap_download_attach(wrap_ssl, filename, buff.data, buff.capacity, buff.len) != 0)
                 {
                     download_initialized = 1;
                     break;
@@ -343,6 +359,7 @@ int receive_imap_response(void *wrap_ssl, char *tag)
         }
     }
     download_initialized = 0;
+    memset(buff.data, 0, buff.capacity);
     free(buff.data);
     return 0;
 }
@@ -421,7 +438,7 @@ int imap_init_connection(struct Connection_wrapper *cwrap)
         exit(EXIT_FAILURE);
     }
 
-    if (receive_imap_response(cwrap->wrap_ssl, "ready for requests") == 1)
+    if (receive_imap_response(cwrap->wrap_ssl, STR_LIT_PTR("OK")) == 1)
     {
         perror("No initial success message\n");
         exit(EXIT_FAILURE);
