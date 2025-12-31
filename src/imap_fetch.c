@@ -39,7 +39,7 @@ int main() {
             continue;
         }
 
-        int offset = find_offset(input, STR_LIT("\n"));
+        size_t offset = find_offset(input, STR_LIT("\n"));
         memmove(input.data + offset + 1, input.data + offset, 1);
         input.data[offset] = '\r';
 

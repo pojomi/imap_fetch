@@ -5,21 +5,25 @@
 
 char *my_memmem(const char *haystack, size_t hay_len, const char *needle, size_t needle_len)
 {
-    printf("my_memmem init\n");
-    for (size_t i = 0; i < hay_len - needle_len; i++)
+    if (hay_len < needle_len) 
+    {
+        return NULL;
+    }
+    
+    for (size_t i = 0; i <= hay_len - needle_len; i++)
     {
         if (memcmp(haystack + i, needle, needle_len) == 0)
         {
-            printf("found match in my_memmem\n");
+            printf("my_memmem returning %s\n", haystack + i);
             return (char *)(haystack + i);
         }
     }
-    printf("no match found in my_memmem\n");
     return NULL;
 }
 
 int find_offset(Str haystack, Str needle)
 {
+    printf("Looking for %s\n", needle.data);
     if (needle.len == 0)
     {
         return -1;
@@ -29,7 +33,7 @@ int find_offset(Str haystack, Str needle)
 
     if (found)
     {
-        return found - haystack.data;
+        return (found - haystack.data);
     }
 
     return -1;
@@ -37,11 +41,9 @@ int find_offset(Str haystack, Str needle)
 
 Str find_substring(Str haystack, Str needle)
 {
-    printf("running find_substring\n");
-    printf("Looking for %s needle in:\nHaystack: %s\n", needle.data, haystack.data);
     if (needle.len == 0)
     {
-        printf("needle has no value\n");
+        printf("Invalid substring search\n");
         return (Str){NULL, 0};
     }
 
@@ -49,19 +51,17 @@ Str find_substring(Str haystack, Str needle)
     
     if (found != NULL)
     {
-        printf("substring found: %s\n123", found);
         return (Str){found, haystack.len - (found - haystack.data)};
     }
-    printf("substring not found, returning NULL\nReturn of my_memmem: %s", found);
     return (Str){NULL, 0};
 }
 
 size_t wrapper_ssl_read(void *wrap_ssl, void *buf, size_t len)
 {
-    size_t bytes_read = (size_t) SSL_read((SSL *)wrap_ssl, buf, len);
+    size_t bytes_read = (size_t)SSL_read((SSL *)wrap_ssl, buf, (int)len);
     if (bytes_read > 0)
     {
-        return (size_t)bytes_read;
+        return bytes_read;
     }
     else
     {
@@ -69,9 +69,9 @@ size_t wrapper_ssl_read(void *wrap_ssl, void *buf, size_t len)
     }
 }
 
-int wrapper_ssl_write(void *wrap_ssl, const void *buf, size_t len)
+size_t wrapper_ssl_write(void *wrap_ssl, const void *buf, size_t len)
 {
-    int bytes_written = SSL_write((SSL *)wrap_ssl, buf, len);
+    size_t bytes_written = (size_t)SSL_write((SSL *)wrap_ssl, buf, (int)len);
     if (bytes_written > 0)
     {
         return bytes_written;
@@ -104,7 +104,7 @@ int imap_send_request(void *wrap_ssl, char *request)
     return 0;
 }
 
-int imap_download_attach(void *wrap_ssl, char *filename, char *buffer, size_t buffer_size, int bytes_read)
+int imap_download_attach(void *wrap_ssl, char *filename, Str buff, size_t bytes_read)
 {
     
     FILE *f = fopen(filename, "wb");
@@ -113,20 +113,20 @@ int imap_download_attach(void *wrap_ssl, char *filename, char *buffer, size_t bu
         perror("Failed to open file\n");
         return -1;
     }
-    // strchr points to the address of the first match in the string
-    // so that gives us the starting point of the download size value in the curly braces
-    // char *open_brace = memchr(buffer, '{', sizeof(buffer));
-    // int *close_brace = memchr(buffer, '}', sizeof(buffer));
-    char *open_brace = strchr(buffer, '{');
-    char *close_brace = strchr(buffer, '}');
 
-    // printf("close_brace: %s\n", close_brace);
+    // Download size (encoded) is found between {} in the server response
+    int open_brace = find_offset(buff, STR_LIT("{"));
+    int close_brace = find_offset(buff, STR_LIT("}"));
+
+
     // atol only retrieves the ASCII in the string
     // returns as type long
-    int download_size = atol(open_brace + 1);
-    int downloaded_bytes = 0;
-    char *data_start = close_brace + 3;
-    int initial_response_data = bytes_read - (data_start - buffer);
+    // int download_size = atol(open_brace + 1);
+    size_t download_size = atol(buff.data + open_brace + 1);
+    size_t downloaded_bytes = 0;
+    char *data_start = (buff.data + close_brace + 3);
+    size_t initial_response_data = bytes_read - (data_start - buff.data);
+    if (initial_response_data > 0)
 
     if (initial_response_data > download_size)
     {
@@ -138,31 +138,36 @@ int imap_download_attach(void *wrap_ssl, char *filename, char *buffer, size_t bu
     size_t pending_len = 0;
     size_t initial_decoded_len;
     size_t decoded_len = 0;
-    char *decoded_data = malloc(buffer_size);
-    memset(decoded_data, 0, buffer_size);
+    buffer decoded = {0};
+    decoded.data = calloc(buff.len, sizeof(char));
+    decoded.capacity = buff.len;
+    decoded.len = buff.len;
     int b64_file = 0;
     int qp_file = 0;
-    if (strstr(buffer, "JVBE"))
+
+    Str parsed_decode_ss_64 = find_substring((Str){buff.data, buff.len}, STR_LIT("JVBE"));
+    Str parsed_decode_ss_qp = find_substring((Str){buff.data, buff.len}, STR_LIT("PDF"));
+    if (parsed_decode_ss_64.data != NULL)
     {
-        initial_decoded_len = decode_64(decoded_data, buffer_size, data_start, initial_response_data, &leftover);
+        initial_decoded_len = decode_64((Str){decoded.data, decoded.len}, (Str){data_start, initial_response_data}, &leftover);
         b64_file = 1;
         if (initial_decoded_len <= 0)
         {
             b64_file = 0;
-            free(decoded_data);
+            free(decoded.data);
             fclose(f);
             return -1;
         }
     }
-    else if (strstr(buffer, "PDF-"))
+    else if (parsed_decode_ss_qp.data != NULL)
     {
-        initial_decoded_len = decode_qp(data_start, initial_response_data, &leftover);
+        initial_decoded_len = decode_qp((Str){data_start, initial_response_data}, &leftover);
         qp_file = 1;
     }
     else 
     {
         perror("Decoding for this type not supported\n");
-        free(decoded_data);
+        free(decoded.data);
         fclose(f);
         return -1;
     }
@@ -172,13 +177,13 @@ int imap_download_attach(void *wrap_ssl, char *filename, char *buffer, size_t bu
         pending_len += leftover;
     }
 
-    // Check for download_size which is provided in the initial buffer response header
+    // Check for download_size which is provided in the initial buff.data response header
     
     if (initial_response_data > 0)
     {
         if (b64_file == 1)
         {
-            fwrite(decoded_data, 1, initial_decoded_len, f);
+            fwrite(decoded.data, 1, initial_decoded_len, f);
         }
         else if (qp_file == 1)
         {
@@ -187,55 +192,62 @@ int imap_download_attach(void *wrap_ssl, char *filename, char *buffer, size_t bu
         else
         {
             printf("No valid encoding found. Exiting\n");
-            free(decoded_data);
+            free(decoded.data);
             fclose(f);
             return -1;
         }
         downloaded_bytes += initial_response_data - leftover;
-        printf("Downloaded %d bytes of %d\n", downloaded_bytes, download_size);
-        memset(decoded_data, 0, initial_decoded_len);
+        printf("Downloaded %ld bytes of %ld\n", downloaded_bytes, download_size);
+        memset(decoded.data, 0, initial_decoded_len);
+        // decoded.data = calloc(initial_decoded_len, sizeof(char));
     }
     
     while (downloaded_bytes < download_size)
     {
-        int remaining = download_size - downloaded_bytes;
-        int to_read = (remaining < buffer_size - pending_len ? remaining : buffer_size - pending_len);
-        size_t chunk_bytes_read = wrapper_ssl_read(wrap_ssl, buffer, to_read);
-        
+        memset(decoded.data, 0, decoded.capacity);
+        size_t remaining = download_size - downloaded_bytes;
+        size_t to_read = (remaining < buff.len - pending_len ? remaining : buff.len - pending_len);
+        size_t chunk_bytes_read = wrapper_ssl_read(wrap_ssl, buff.data, to_read);
 
         if (pending_len > 0)
         {
-            memmove(buffer + pending_len, buffer, chunk_bytes_read);
-            memcpy(buffer, pending, pending_len);
+            memmove(buff.data + pending_len, buff.data, chunk_bytes_read);
+            memcpy(buff.data, pending, pending_len);
             chunk_bytes_read += pending_len;
+            printf("DEBUG: chunk_bytes_read=%zu, decoded_len=%zu, leftover=%zu\n", chunk_bytes_read, decoded_len, leftover);
             pending_len = 0;
         }
         if (b64_file == 1)
         {
-            decoded_len = decode_64(decoded_data, buffer_size, buffer, chunk_bytes_read, &leftover);
-            if (decoded_len < 0)
+            decoded_len = decode_64((Str){decoded.data, decoded.len}, (Str){buff.data, chunk_bytes_read}, &leftover);
+
+            // decoded_len == 0 is valid when chunk only contains leftover bytes
+            // Only error if we got 0 decoded AND no leftover (unexpected)
+            if (decoded_len == 0 && leftover == 0 && chunk_bytes_read > 0)
             {
-                free(decoded_data);
+                printf("Decode error: no output and no leftover\n");
+                free(decoded.data);
                 fclose(f);
                 return -1;
             }
         }
         if (qp_file == 1)
         {
-            decoded_len = decode_qp(buffer, chunk_bytes_read, &leftover);
+            decoded_len = decode_qp((Str){buff.data, chunk_bytes_read}, &leftover);
             if (decoded_len < 0)
             {
                 printf("Failed to decode current block. Exiting\n");
                 fflush(f);
                 fclose(f);
-                free(decoded_data);
+                free(decoded.data);
+                free(buff.data);
                 return -1;
             }
         }
 
         if (leftover > 0)
         {
-            memcpy(pending, buffer + chunk_bytes_read - leftover, leftover);
+            memcpy(pending, buff.data + chunk_bytes_read - leftover, leftover);
             pending_len = leftover;
         }
         
@@ -246,29 +258,33 @@ int imap_download_attach(void *wrap_ssl, char *filename, char *buffer, size_t bu
         int download_percent = (downloaded_bytes * 100) / download_size;
         if (b64_file == 1)
         {
-            char *eof = strstr(decoded_data, "%%EOF");
-            if (eof)
-            {
-                decoded_len = (size_t)(eof + 4);
-                downloaded_bytes += chunk_bytes_read - leftover;
-                break;   
-            }
-            fwrite(decoded_data, 1, decoded_len, f);
+
+            // printf("DEBUG: searching decoded.data (%p) len=%zu for %%EOF\n", (void*)decoded.data, decoded_len);
+            // size_t eof = find_offset((Str){decoded.data, decoded_len}, STR_LIT("%%EOF"));
+            // printf("DEBUG: eof=%ld\n", eof);
+            // // char *eof = strstr(decoded.data, "%%EOF");
+            // if (eof != -1)
+            // {
+            //     decoded_len = (eof + 5);
+            //     downloaded_bytes += chunk_bytes_read - leftover;
+            //     break;   
+            // }
+            fwrite(decoded.data, 1, decoded_len, f);
         }
         else if (qp_file == 1)
         {
-            fwrite(buffer, 1, decoded_len, f);
+            fwrite(buff.data, 1, decoded_len, f);
         }
         downloaded_bytes += chunk_bytes_read - leftover;
-        printf("\rDownloaded %d bytes of %d (%d%%)", downloaded_bytes, download_size, download_percent);
+        printf("\rDownloaded %ld bytes of %ld (%d%%)", downloaded_bytes, download_size, download_percent);
         fflush(stdout);
         printf("\n");
-        memset(decoded_data, 0, decoded_len);
+        memset(decoded.data, 0, decoded_len);
     }
-    printf("Downloaded %d bytes of %d\n", downloaded_bytes, download_size);
+    printf("Downloaded %ld bytes of %ld\n", downloaded_bytes, download_size);
     fclose(f);
     printf("File saved as %s\n", filename);
-    free(decoded_data);
+    free(decoded.data);
     b64_file = 0;
     qp_file = 0;
     return 0;
@@ -285,7 +301,6 @@ int receive_imap_response(void *wrap_ssl, Str *tag)
     // int bytes_read;
     int total_bytes_read = 0;
     
-    printf("Parsing response for %s\n", (const char *)tag->data);
     while (1)
     {
         buff.len = wrapper_ssl_read(wrap_ssl, buff.data, buff.capacity - 1);
@@ -296,22 +311,17 @@ int receive_imap_response(void *wrap_ssl, Str *tag)
             break;
         }
         
-        Str bad_response = find_substring((Str){buff.data, buff.len}, STR_LIT("BAD"));
-        if (bad_response.data == NULL)
-        {
-            printf("No BAD response found\n");
-        }
-        else
-        {
-            printf("BAD response received from server\n");
-            printf("Response: %s\n", (const char *)buff.data);
-            memset(buff.data, 0, buff.capacity);
-            break;
-        }
+        // Str bad_response = find_substring((Str){buff.data, buff.len}, STR_LIT(" BAD"));
+        // if (bad_response.data != NULL)
+        // {
+        //     printf("BAD response received from server\n");
+        //     printf("BAD response: %s\n", buff.data);
+        //     memset(buff.data, 0, buff.capacity);
+        //     break;
+        // }
         Str no_match = find_substring((Str){buff.data, buff.len}, *tag);
         if (no_match.data == NULL)
-        {
-            printf("No match on this loop.\n");    
+        {    
             if (download_initialized == 0)
             {
                 if (buff.capacity < 2048)
@@ -333,23 +343,30 @@ int receive_imap_response(void *wrap_ssl, Str *tag)
             // Conditions to handle file download (tag FETCH [ID] body[PART])
             // Response includes {RB_SIZE}
             // Parse that and store as download size
-            Str download_response = find_substring(STR_LIT(buff.data), STR_LIT("(BODY"));
+            Str download_response = find_substring((Str){buff.data, buff.len}, STR_LIT("(BODY"));
             if (download_response.data != NULL)
             {
-                printf("Response received:\n%s\n", (const char *)buff.data);
+                printf("Response received:\n%s\n", buff.data);
                 printf("Bytes: %ld\n", buff.len);
-                char filename[128];
+
+                Str filename = {0};
+                filename.data = calloc(128, sizeof(char));
+                filename.len = 128;
                 printf("Name file>");
-                if (fgets(filename, sizeof(filename), stdin) != NULL)
+                if (fgets(filename.data, filename.len, stdin) != NULL)
                 {
-                    filename[strcspn(filename, "\n")] = '\0';
+                    // Remove \n from the filename
+                    int filename_offset = find_offset(filename, STR_LIT("\n"));
+                    memset(filename.data + filename_offset, 0, sizeof(char));
+                    
                 }
                 printf("Beginning file creation\n");
-                if (imap_download_attach(wrap_ssl, filename, buff.data, buff.capacity, buff.len) != 0)
+                if (imap_download_attach(wrap_ssl, filename.data, (Str){buff.data, buff.len}, total_bytes_read) != 0)
                 {
                     download_initialized = 1;
-                    break;
+                    continue;
                 }
+                free(filename.data);
             }
             if (download_initialized == 0)
             {
@@ -359,7 +376,6 @@ int receive_imap_response(void *wrap_ssl, Str *tag)
         }
     }
     download_initialized = 0;
-    memset(buff.data, 0, buff.capacity);
     free(buff.data);
     return 0;
 }
