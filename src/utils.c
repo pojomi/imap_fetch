@@ -14,7 +14,6 @@ char *my_memmem(const char *haystack, size_t hay_len, const char *needle, size_t
     {
         if (memcmp(haystack + i, needle, needle_len) == 0)
         {
-            printf("my_memmem returning %s\n", haystack + i);
             return (char *)(haystack + i);
         }
     }
@@ -197,14 +196,16 @@ int imap_download_attach(void *wrap_ssl, char *filename, Str buff, size_t bytes_
             return -1;
         }
         downloaded_bytes += initial_response_data - leftover;
-        printf("Downloaded %ld bytes of %ld\n", downloaded_bytes, download_size);
-        memset(decoded.data, 0, initial_decoded_len);
-        // decoded.data = calloc(initial_decoded_len, sizeof(char));
+        if (b64_file == 1 )
+        {
+            memset(decoded.data, 0, initial_decoded_len);
+        }
     }
     
     while (downloaded_bytes < download_size)
     {
-        memset(decoded.data, 0, decoded.capacity);
+        if (b64_file == 1) memset(decoded.data, 0, decoded.capacity);
+        
         size_t remaining = download_size - downloaded_bytes;
         size_t to_read = (remaining < buff.len - pending_len ? remaining : buff.len - pending_len);
         size_t chunk_bytes_read = wrapper_ssl_read(wrap_ssl, buff.data, to_read);
@@ -214,7 +215,6 @@ int imap_download_attach(void *wrap_ssl, char *filename, Str buff, size_t bytes_
             memmove(buff.data + pending_len, buff.data, chunk_bytes_read);
             memcpy(buff.data, pending, pending_len);
             chunk_bytes_read += pending_len;
-            printf("DEBUG: chunk_bytes_read=%zu, decoded_len=%zu, leftover=%zu\n", chunk_bytes_read, decoded_len, leftover);
             pending_len = 0;
         }
         if (b64_file == 1)
@@ -234,19 +234,11 @@ int imap_download_attach(void *wrap_ssl, char *filename, Str buff, size_t bytes_
         if (qp_file == 1)
         {
             decoded_len = decode_qp((Str){buff.data, chunk_bytes_read}, &leftover);
-            if (decoded_len < 0)
-            {
-                printf("Failed to decode current block. Exiting\n");
-                fflush(f);
-                fclose(f);
-                free(decoded.data);
-                free(buff.data);
-                return -1;
-            }
         }
 
         if (leftover > 0)
         {
+            // Move the leftover bytes into pending array
             memcpy(pending, buff.data + chunk_bytes_read - leftover, leftover);
             pending_len = leftover;
         }
@@ -254,21 +246,14 @@ int imap_download_attach(void *wrap_ssl, char *filename, Str buff, size_t bytes_
         if (downloaded_bytes + chunk_bytes_read > download_size)
         {
             decoded_len = download_size - downloaded_bytes;
+            // printf("Math error! downloaded_bytes + chunk_bytes_read > download_size\n");
+            // printf("downloaded_bytes: %ld\nchunk_bytes_read: %ld\ndownload_size: %ld\n", downloaded_bytes, chunk_bytes_read, download_size);
+            // if (b64_file == 1) free(decoded.data);
+            // return -1;
         }
         int download_percent = (downloaded_bytes * 100) / download_size;
         if (b64_file == 1)
         {
-
-            // printf("DEBUG: searching decoded.data (%p) len=%zu for %%EOF\n", (void*)decoded.data, decoded_len);
-            // size_t eof = find_offset((Str){decoded.data, decoded_len}, STR_LIT("%%EOF"));
-            // printf("DEBUG: eof=%ld\n", eof);
-            // // char *eof = strstr(decoded.data, "%%EOF");
-            // if (eof != -1)
-            // {
-            //     decoded_len = (eof + 5);
-            //     downloaded_bytes += chunk_bytes_read - leftover;
-            //     break;   
-            // }
             fwrite(decoded.data, 1, decoded_len, f);
         }
         else if (qp_file == 1)
@@ -279,7 +264,7 @@ int imap_download_attach(void *wrap_ssl, char *filename, Str buff, size_t bytes_
         printf("\rDownloaded %ld bytes of %ld (%d%%)", downloaded_bytes, download_size, download_percent);
         fflush(stdout);
         printf("\n");
-        memset(decoded.data, 0, decoded_len);
+        if (b64_file == 1) memset(decoded.data, 0, decoded_len);
     }
     printf("Downloaded %ld bytes of %ld\n", downloaded_bytes, download_size);
     fclose(f);
@@ -310,15 +295,7 @@ int receive_imap_response(void *wrap_ssl, Str *tag)
             printf("0 bytes found\n");
             break;
         }
-        
-        // Str bad_response = find_substring((Str){buff.data, buff.len}, STR_LIT(" BAD"));
-        // if (bad_response.data != NULL)
-        // {
-        //     printf("BAD response received from server\n");
-        //     printf("BAD response: %s\n", buff.data);
-        //     memset(buff.data, 0, buff.capacity);
-        //     break;
-        // }
+
         Str no_match = find_substring((Str){buff.data, buff.len}, *tag);
         if (no_match.data == NULL)
         {    
@@ -346,9 +323,6 @@ int receive_imap_response(void *wrap_ssl, Str *tag)
             Str download_response = find_substring((Str){buff.data, buff.len}, STR_LIT("(BODY"));
             if (download_response.data != NULL)
             {
-                printf("Response received:\n%s\n", buff.data);
-                printf("Bytes: %ld\n", buff.len);
-
                 Str filename = {0};
                 filename.data = calloc(128, sizeof(char));
                 filename.len = 128;

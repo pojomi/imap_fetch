@@ -61,9 +61,7 @@ size_t decode_64(Str buff_d, Str buff_s, size_t *leftover)
                 }
 
                 buff_d.data[j++] = (b64v1 << 2) | (b64v2 >> 4);
-                // memmove(buff_d.data + i + 2, buff_d.data + i + 3, (strlen(buff_d.data) - i + 2));
                 i+=4;
-                // j+=2;
 
                 continue;
             }
@@ -92,9 +90,7 @@ size_t decode_64(Str buff_d, Str buff_s, size_t *leftover)
 
                 buff_d.data[j++] = (b64v1 << 2) | (b64v2 >> 4);
                 buff_d.data[j++] = (b64v2 << 4) | (b64v3 >> 2);
-                // memmove(buff_d.data + i + 3, buff_d.data + i + 4, (strlen(buff_d.data) - i + 3));
                 i+=4;
-                // j+=3;
 
                 continue;
             }
@@ -134,7 +130,6 @@ size_t decode_64(Str buff_d, Str buff_s, size_t *leftover)
         else
         {
             printf("End of buffered data\n");
-            // printf("Leftover: %lu, i: %lu", len, i);
             // Use leftover as data index reference for the return
             *leftover = buff_s.len - i;
             i+=4;
@@ -150,7 +145,7 @@ size_t decode_qp(Str buff, size_t *leftover)
     size_t i = 0;
     // Write position
     size_t j = 0;
-    leftover = 0;
+    *leftover = 0;
     
     while (i < buff.len)
     {
